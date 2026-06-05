@@ -1,0 +1,114 @@
+//@version=5
+// Dr S — Opening-Window Volume + Range  (TradingView port)
+// Per-minute-SLOT volume baseline (z-score, 2.0 SD outlier) + opening-range ratio/z.
+// USE ON A 1-MINUTE CHART. overlay=false => its own bottom pane = your volume.
+// Delete the built-in Volume study. Dr S coloring applies only in the opening window
+// (yellow outlier / teal above slot-avg); normal up/down volume the rest of the day.
+indicator("Dr S — Opening Volume + Range", shorttitle="Dr S", overlay=false, max_bars_back=5000)
+
+// ── Inputs ──
+lookback   = input.int(14,  "Baseline sessions", minval=2)
+outlierSD  = input.float(2.0,"Outlier z-score",   step=0.1, minval=0.1)
+openWindow = input.int(30,  "Opening window (min)", minval=1, maxval=120)
+osH        = input.int(9,   "Session open hour",   minval=0, maxval=23)
+osM        = input.int(30,  "Session open minute", minval=0, maxval=59)
+
+openMin = osH * 60 + osM
+
+// ── Where are we in the session? ──
+h    = hour(time,   syminfo.timezone)
+m    = minute(time, syminfo.timezone)
+slot = (h * 60 + m) - openMin
+inWindow = slot >= 0 and slot < openWindow
+
+newSession = bar_index > 0 and ta.change(time("D")) != 0
+
+// ── Rolling storage ──
+var matrix<float> hist      = matrix.new<float>(openWindow, lookback, na)
+var array<float>  todayVol  = array.new_float(openWindow, na)
+var array<float>  rangeHist = array.new_float(0)
+var int           wptr      = 0
+var int           committed = 0
+var float todHigh = na
+var float todLow  = na
+var bool  triggeredToday = false
+
+if newSession
+    if not na(todHigh) and not na(todLow)
+        array.push(rangeHist, todHigh - todLow)
+        if array.size(rangeHist) > lookback
+            array.shift(rangeHist)
+    writeCol = wptr % lookback
+    for s = 0 to openWindow - 1
+        matrix.set(hist, s, writeCol, array.get(todayVol, s))
+        array.set(todayVol, s, na)
+    wptr      += 1
+    committed := math.min(committed + 1, lookback)
+    todHigh := na
+    todLow  := na
+    triggeredToday := false
+
+if inWindow
+    array.set(todayVol, slot, volume)
+    todHigh := na(todHigh) ? high : math.max(todHigh, high)
+    todLow  := na(todLow)  ? low  : math.min(todLow,  low)
+
+// ── Per-slot volume baseline + z-score ──
+float meanVol = na
+float zScore  = na
+bool  outlier = false
+if inWindow and committed >= 1
+    vals = array.new_float(0)
+    for c = 0 to lookback - 1
+        v = matrix.get(hist, slot, c)
+        if not na(v)
+            array.push(vals, v)
+    if array.size(vals) >= 2
+        meanVol  := array.avg(vals)
+        sd       = array.stdev(vals)
+        zScore  := sd > 0 ? (volume - meanVol) / sd : na
+        outlier := not na(zScore) and math.abs(zScore) >= outlierSD
+
+// ── Opening-range stats ──
+todayRange = (na(todHigh) or na(todLow)) ? na : todHigh - todLow
+avgRange   = array.size(rangeHist) >= 1 ? array.avg(rangeHist)   : na
+rangeStd   = array.size(rangeHist) >= 2 ? array.stdev(rangeHist) : na
+ratio      = (not na(avgRange) and avgRange > 0) ? todayRange / avgRange : na
+rangeZ     = (not na(rangeStd) and rangeStd > 0) ? (todayRange - avgRange) / rangeStd : na
+
+// ── Trigger latch: outlier bar AND range >= 2x, sticky for the session ──
+if inWindow and outlier and not na(ratio) and ratio >= 2.0
+    triggeredToday := true
+
+// ── Volume plot (FULL session, this pane = your volume) ──
+// In opening window  -> Dr S coloring (yellow outlier / teal above slot-avg / dim below)
+// Outside the window -> normal up/down volume coloring
+normUp = color.new(#26a69a, 40)
+normDn = color.new(#ef5350, 40)
+vcol = inWindow
+   ? (outlier ? color.new(color.yellow, 0)
+      : (not na(meanVol) and volume >= meanVol ? color.new(color.teal, 0)
+      : color.new(color.gray, 30)))
+   : (close >= open ? normUp : normDn)
+plot(volume, "Volume", color=vcol, style=plot.style_columns)
+plot(inWindow ? meanVol : na, "Slot avg", color=color.new(color.white, 40),
+     style=plot.style_linebr, linewidth=1)
+
+// ── Compact inline "Dr S" tab (BOTTOM-right) — VOLD-size text ──
+// One row: [Dr S]  z <rangeZ>  out <YES/no>.  "Dr S" cell flips red->green on trigger.
+var table t = table.new(position.bottom_right, 3, 1, force_overlay=true)
+if barstate.islast
+    tabCol  = triggeredToday ? color.new(color.green, 0) : color.new(color.red, 0)
+    outCol  = outlier ? color.new(color.yellow, 0) : color.new(color.white, 0)
+    table.cell(t, 0, 0, "Dr S", text_color=color.white, text_size=size.normal,
+         bgcolor=tabCol)
+    table.cell(t, 1, 0, str.format("z {0,number,#.##}", rangeZ),
+         text_color=color.new(color.white, 0), text_size=size.normal,
+         bgcolor=color.new(color.black, 20))
+    table.cell(t, 2, 0, str.format("out {0}", outlier ? "YES" : "no"),
+         text_color=outCol, text_size=size.normal, bgcolor=color.new(color.black, 20))
+
+// ── Alerts ──
+alertcondition(outlier, "Vol outlier bar", "Dr S: volume outlier bar (z >= threshold)")
+alertcondition(not na(ratio) and ratio >= 2.0, "Range >= 2x", "Dr S: opening range >= 2x the N-session average")
+alertcondition(triggeredToday and not triggeredToday[1], "Dr S triggered", "Dr S: outlier bar AND range >= 2x")

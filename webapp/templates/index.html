@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WAT Command Center</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3;
+    --muted:#8b949e; --accent:#58a6ff; --green:#3fb950; --red:#f85149; --amber:#d29922;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:"Segoe UI",system-ui,sans-serif;font-size:15px}
+  header{padding:14px 22px;border-bottom:1px solid var(--border);
+         display:flex;align-items:center;gap:14px;background:var(--panel)}
+  header h1{font-size:17px;margin:0;letter-spacing:.5px;font-weight:600}
+  header .sub{color:var(--muted);font-size:12px}
+  .wrap{max-width:1000px;margin:0 auto;padding:22px}
+  .bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:18px}
+  input[type=text]{flex:1;min-width:220px;background:#0d1117;border:1px solid var(--border);
+    color:var(--text);padding:11px 14px;border-radius:8px;font-size:15px;outline:none}
+  input[type=text]:focus{border-color:var(--accent)}
+  button{background:#21262d;border:1px solid var(--border);color:var(--text);
+    padding:11px 16px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:500}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button.primary{background:var(--accent);color:#0d1117;border-color:var(--accent);font-weight:600}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .hint{color:var(--muted);font-size:12px;margin:-8px 0 16px}
+  #out{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+    padding:18px 22px;min-height:120px}
+  #out pre{white-space:pre-wrap;word-break:break-word;font-family:"Cascadia Code",Consolas,monospace;
+    font-size:13px;line-height:1.5;margin:0;color:var(--text)}
+  .md h2{font-size:18px;border-bottom:1px solid var(--border);padding-bottom:6px;margin:18px 0 10px}
+  .md ul{padding-left:20px} .md li{margin:3px 0}
+  .md code{background:#0d1117;padding:2px 6px;border-radius:5px;font-size:13px}
+  .md strong{color:#fff}
+  .spinner{color:var(--muted)}
+  .empty{color:var(--muted);text-align:center;padding:40px 0}
+  footer{color:var(--muted);font-size:11px;text-align:center;padding:16px}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ WAT COMMAND CENTER</h1>
+  <span class="sub">low-float pre-open read · dilution · cascade · financier</span>
+</header>
+
+<div class="wrap">
+  <div class="bar">
+    <input id="ticker" type="text" placeholder="ticker(s) — e.g. STI  or  STI LULU" autofocus>
+    <button class="primary" onclick="run('dilution')">Dilution / Float</button>
+    <button onclick="run('cascade')">Cascade</button>
+    <button onclick="run('financier')">Financier DB</button>
+  </div>
+  <div class="hint">Dilution & Cascade use the ticker box. Financier DB shows the whole database. Enter = Dilution.</div>
+
+  <div id="out"><div class="empty">Enter a ticker and pick a read.</div></div>
+</div>
+
+<footer>local · runs your Python tools · Claude Code is the AI brain (in-app AI chat = later phase)</footer>
+
+<script>
+const out = document.getElementById('out');
+const tickerEl = document.getElementById('ticker');
+
+tickerEl.addEventListener('keydown', e => { if(e.key==='Enter') run('dilution'); });
+
+async function run(tool){
+  const tickers = tickerEl.value.trim();
+  if(tool!=='financier' && !tickers){ out.innerHTML='<div class="empty">Type a ticker first.</div>'; return; }
+  out.innerHTML = '<div class="spinner">Running <b>'+tool+'</b>'+(tickers?(' · '+tickers):'')+' … (EDGAR + Polygon, a few seconds)</div>';
+  document.querySelectorAll('button').forEach(b=>b.disabled=true);
+  try{
+    const url = '/api/run?tool='+encodeURIComponent(tool)+'&tickers='+encodeURIComponent(tickers);
+    const r = await fetch(url);
+    const j = await r.json();
+    if(!j.ok && j.error){ out.innerHTML = '<pre style="color:var(--red)">'+j.error+'</pre>'; return; }
+    if(j.render==='markdown'){
+      out.className=''; out.innerHTML = '<div class="md">'+marked.parse(j.output||'')+'</div>';
+    } else {
+      out.innerHTML = '<pre>'+escapeHtml(j.output||'(no output)')+'</pre>';
+    }
+  }catch(err){
+    out.innerHTML = '<pre style="color:var(--red)">request failed: '+err+'</pre>';
+  }finally{
+    document.querySelectorAll('button').forEach(b=>b.disabled=false);
+  }
+}
+function escapeHtml(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+</script>
+</body>
+</html>

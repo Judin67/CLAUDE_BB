@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"import json; json.load\\(open\\(''C:/Users/Trader/quant-project/notebooks/technicals/sector_internals.ipynb''\\)\\)\")",
-      "Bash(git add:*)",
-      "Bash(git commit:*)"
-    ]
-  }
-}
