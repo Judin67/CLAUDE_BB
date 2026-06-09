@@ -34,19 +34,38 @@ def ticker_overview(ticker):
     return poly_get(f"/v3/reference/tickers/{ticker.upper()}")
 
 
-def latest_news(ticker, limit=3):
-    return poly_get("/v2/reference/news",
-                    {"ticker": ticker.upper(), "limit": limit, "order": "desc", "sort": "published_utc"})
+def latest_news(ticker, limit=3, until=None):
+    p = {"ticker": ticker.upper(), "limit": limit, "order": "desc", "sort": "published_utc"}
+    if until:                       # point-in-time: no news after the card date
+        p["published_utc.lte"] = until
+    return poly_get("/v2/reference/news", p)
 
 
-def short_interest(ticker):
-    return poly_get("/stocks/v1/short-interest",
-                    {"ticker": ticker.upper(), "sort": "settlement_date.desc", "limit": 1})
+def free_float(ticker):
+    """Latest FREE FLOAT (tradable shares) from Massive /stocks/vX/float.
+
+    Excludes insiders, 5%+ holders, lockups, strategic/controlling stakes — i.e.
+    real free float, NOT shares outstanding. Returns the result dict with keys
+    free_float, free_float_percent, effective_date, ticker (or None/_status)."""
+    d = poly_get("/stocks/vX/float", {"ticker": ticker.upper(), "limit": 1})
+    if not d or "_status" in d:
+        return d
+    res = d.get("results") or []
+    return res[0] if res else None
 
 
-def short_volume(ticker):
-    return poly_get("/stocks/v1/short-volume",
-                    {"ticker": ticker.upper(), "sort": "date.desc", "limit": 1})
+def short_interest(ticker, until=None):
+    p = {"ticker": ticker.upper(), "sort": "settlement_date.desc", "limit": 1}
+    if until:
+        p["settlement_date.lte"] = until
+    return poly_get("/stocks/v1/short-interest", p)
+
+
+def short_volume(ticker, until=None):
+    p = {"ticker": ticker.upper(), "sort": "date.desc", "limit": 1}
+    if until:
+        p["date.lte"] = until
+    return poly_get("/stocks/v1/short-volume", p)
 
 
 if __name__ == "__main__":

@@ -61,14 +61,17 @@ class EdgarClient:
         h = self._headers()
         h["Host"] = host
         last_exc = None
-        for attempt in range(3):
+        for attempt in range(4):
             if attempt:
                 time.sleep(0.5 * attempt)
             r = requests.get(url, params=params, headers=h, timeout=30)
             self._last_call = time.time()
             if r.status_code == 404:
                 return None
-            if r.status_code >= 500:          # transient SEC errors — retry
+            # 429 (rate-limit) / 403 (UA throttle) / 5xx are transient — back off & retry
+            if r.status_code in (429, 403) or r.status_code >= 500:
+                ra = r.headers.get("Retry-After")
+                time.sleep(float(ra) if (ra and ra.isdigit()) else 1.0 * (attempt + 1))
                 last_exc = requests.HTTPError(f"{r.status_code} for {r.url}")
                 continue
             r.raise_for_status()
@@ -94,45 +97,77 @@ class EdgarClient:
         self._tickers = {row["ticker"].upper(): row for row in data.values()}
         return self._tickers
 
+    def _ticker_row(self, ticker):
+        """Look up a ticker row, normalizing class-share separators.
+        SEC stores class tickers with a hyphen (BRK-B); traders/Polygon use the
+        dot form (BRK.B) or none. Try the common variants."""
+        m = self._load_tickers()
+        t = ticker.upper()
+        for cand in (t, t.replace('.', '-'), t.replace('.', ''), t.replace('-', '')):
+            if cand in m:
+                return m[cand]
+        return None
+
     def ticker_to_cik(self, ticker):
         """Return zero-padded 10-digit CIK string, or None if not found."""
-        row = self._load_tickers().get(ticker.upper())
+        row = self._ticker_row(ticker)
         return f"{int(row['cik_str']):010d}" if row else None
 
     def company_name(self, ticker):
-        row = self._load_tickers().get(ticker.upper())
+        row = self._ticker_row(ticker)
         return row["title"] if row else None
 
     # ── submissions / filings ────────────────────────────────────────────────
     def submissions(self, cik):
         return self._get(f"https://data.sec.gov/submissions/CIK{cik}.json")
 
-    def recent_filings(self, cik, forms=None, since=None):
+    _FILING_COLS = ["form", "filingDate", "reportDate", "accessionNumber",
+                    "primaryDocument", "primaryDocDescription"]
+
+    def recent_filings(self, cik, forms=None, since=None, until=None):
         """
-        DataFrame of recent filings (form, filingDate, accessionNumber, primaryDocument).
-        forms : optional list of form types to keep (prefix match, e.g. 'S-3' keeps 'S-3/A').
+        DataFrame of filings (form, filingDate, reportDate, accessionNumber, primaryDocument, primaryDocDescription).
+        forms : optional list of form types. EXACT form + amendment match (anchored regex),
+                so 'S-1' no longer matches 'S-11'/'S-1MEF' and 'S-3' no longer matches
+                'S-3D'/'S-3DPOS'. List ASR variants (S-3ASR/F-3ASR) explicitly if wanted.
         since : optional 'YYYY-MM-DD' lower bound on filingDate.
+        until : optional 'YYYY-MM-DD' upper bound on filingDate (point-in-time runs).
+        Pulls older paged shard files when `since` reaches before the inline 'recent' block.
         """
         sub = self.submissions(cik)
         if not sub:
-            return pd.DataFrame()
-        rec = sub.get("filings", {}).get("recent", {})
-        df = pd.DataFrame({
-            "form": rec.get("form", []),
-            "filingDate": rec.get("filingDate", []),
-            "reportDate": rec.get("reportDate", []),
-            "accessionNumber": rec.get("accessionNumber", []),
-            "primaryDocument": rec.get("primaryDocument", []),
-            "primaryDocDescription": rec.get("primaryDocDescription", []),
-        })
-        if df.empty:
-            return df
+            return pd.DataFrame(columns=self._FILING_COLS)
+        filings = sub.get("filings", {})
+        blocks = [filings.get("recent", {})]
+        if since:
+            rec_dates = filings.get("recent", {}).get("filingDate", [])
+            oldest = rec_dates[-1] if rec_dates else None
+            if oldest and pd.Timestamp(oldest) > pd.Timestamp(since):
+                for shard in (filings.get("files") or []):
+                    nm = shard.get("name")
+                    fto = shard.get("filingTo")
+                    if nm and not (fto and pd.Timestamp(fto) < pd.Timestamp(since)):
+                        data = self._get(f"https://data.sec.gov/submissions/{nm}")
+                        if data:
+                            blocks.append(data)
+        frames = []
+        for b in blocks:
+            n = len(b.get("form", []))
+            if not n:
+                continue
+            frames.append(pd.DataFrame({c: (b.get(c) if len(b.get(c, [])) == n else [None] * n)
+                                        for c in self._FILING_COLS}))
+        if not frames:
+            return pd.DataFrame(columns=self._FILING_COLS)
+        df = pd.concat(frames, ignore_index=True)
         df["filingDate"] = pd.to_datetime(df["filingDate"], errors="coerce")
         if forms:
-            mask = df["form"].apply(lambda f: any(str(f).startswith(x) for x in forms))
-            df = df[mask]
+            pat = r'^(?:' + '|'.join(re.escape(x) for x in forms) + r')(?:/A.*)?$'
+            df = df[df["form"].astype(str).str.match(pat)]
         if since:
             df = df[df["filingDate"] >= pd.Timestamp(since)]
+        if until:
+            df = df[df["filingDate"] <= pd.Timestamp(until)]
         return df.sort_values("filingDate", ascending=False).reset_index(drop=True)
 
     def filing_url(self, cik, accession, doc=None):
@@ -169,39 +204,84 @@ class EdgarClient:
                 json.dump(data, f)
         return data
 
-    @staticmethod
-    def concept(facts, tag, taxonomies=("us-gaap", "dei")):
-        """All datapoints for an XBRL tag as a DataFrame (end, val, form, filed, unit)."""
+    _CONCEPT_COLS = ["end", "val", "start", "form", "filed", "fy", "fp", "unit", "frame"]
+
+    @classmethod
+    def concept(cls, facts, tag, taxonomies=("us-gaap", "dei"), unit=None, positive=False):
+        """All datapoints for an XBRL tag as a DataFrame
+        (end, val, start, form, filed, fy, fp, unit, frame), sorted by (end, filed) STABLY.
+        unit     : if set, keep only that unit (e.g. 'shares','USD') — avoids mixing currencies.
+        positive : if True, drop val<=0 placeholder rows (avoids false 0-share reads).
+        Returns an empty frame WITH columns when the tag is absent, so callers can
+        safely dropna/access columns (a bare DataFrame() would KeyError)."""
+        empty = pd.DataFrame(columns=cls._CONCEPT_COLS)
         if not facts:
-            return pd.DataFrame()
+            return empty
         for tax in taxonomies:
             node = facts.get("facts", {}).get(tax, {}).get(tag)
             if not node:
                 continue
             rows = []
-            for unit, points in node.get("units", {}).items():
+            for u, points in node.get("units", {}).items():
+                if unit and u != unit:
+                    continue
                 for p in points:
                     rows.append({"end": p.get("end"), "val": p.get("val"),
-                                 "form": p.get("form"), "filed": p.get("filed"),
-                                 "fy": p.get("fy"), "fp": p.get("fp"), "unit": unit})
+                                 "start": p.get("start"), "form": p.get("form"),
+                                 "filed": p.get("filed"), "fy": p.get("fy"),
+                                 "fp": p.get("fp"), "unit": u, "frame": p.get("frame")})
             if rows:
                 df = pd.DataFrame(rows)
                 df["end"] = pd.to_datetime(df["end"], errors="coerce")
+                df["start"] = pd.to_datetime(df["start"], errors="coerce")
                 df["filed"] = pd.to_datetime(df["filed"], errors="coerce")
-                return df.sort_values("filed").reset_index(drop=True)
-        return pd.DataFrame()
+                if positive:
+                    df = df[df["val"].notna() & (df["val"] > 0)]
+                # stable sort so per-end restatements keep deterministic order
+                return df.sort_values(["end", "filed"], kind="mergesort").reset_index(drop=True)
+        return empty
 
     def latest(self, facts, tags, taxonomies=("us-gaap", "dei")):
-        """Most-recently-filed value among candidate tags. Returns (value, asof_date, tag) or (None,...)."""
+        """Value for the most-recent REPORTING PERIOD among candidate tags (not just
+        most-recently-filed — a late 10-K/A for an old period must NOT clobber the
+        current count). Ranks by (end, filed); ties prefer earlier tags in `tags`
+        (so dei entity-total beats a us-gaap per-class row). Returns (value, asof_end, tag)."""
         best = (None, None, None)
-        best_filed = None
-        for tag in tags:
-            df = self.concept(facts, tag, taxonomies)
+        best_key = None
+        for i, tag in enumerate(tags):
+            df = self.concept(facts, tag, taxonomies, positive=True)
             if df.empty:
                 continue
-            row = df.iloc[-1]
-            if best_filed is None or (pd.notna(row["filed"]) and row["filed"] > best_filed):
-                best_filed = row["filed"]
+            row = df.iloc[-1]               # concept is sorted (end, filed) → latest period+restatement
+            end = row["end"] if pd.notna(row["end"]) else pd.Timestamp.min
+            filed = row["filed"] if pd.notna(row["filed"]) else pd.Timestamp.min
+            key = (end, filed, -i)
+            if best_key is None or key > best_key:
+                best_key = key
+                best = (row["val"], row["end"], tag)
+        return best
+
+    def latest_asof(self, facts, tags, as_of, taxonomies=("us-gaap", "dei")):
+        """Point-in-time `latest()`: among datapoints actually FILED on/before `as_of`,
+        return the value for the most-recent reporting period. Prevents lookahead — a
+        post-`as_of` 10-Q's share count must not be used to grade a pre-`as_of` event.
+        `as_of` may be a date/datetime/str. Returns (value, asof_end, tag) like latest()."""
+        cutoff = pd.Timestamp(as_of)
+        best = (None, None, None)
+        best_key = None
+        for i, tag in enumerate(tags):
+            df = self.concept(facts, tag, taxonomies, positive=True)
+            if df.empty:
+                continue
+            df = df[df["filed"].notna() & (df["filed"] <= cutoff)]   # only what was public by as_of
+            if df.empty:
+                continue
+            row = df.iloc[-1]               # still sorted (end, filed) → latest period+restatement ≤ cutoff
+            end = row["end"] if pd.notna(row["end"]) else pd.Timestamp.min
+            filed = row["filed"] if pd.notna(row["filed"]) else pd.Timestamp.min
+            key = (end, filed, -i)
+            if best_key is None or key > best_key:
+                best_key = key
                 best = (row["val"], row["end"], tag)
         return best
 
