@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 """
-WAT Command Center — local Flask dashboard.
+Low-Float Dilution Scanner — local Flask dashboard.
 
 A visual, click-driven front-end over the WAT tools. It shells out to the
 existing CLI tools (so it always runs the exact tested code) and renders their
@@ -30,7 +30,10 @@ TOOLS = {
     "dilution":  ("tools/fetch_dilution.py",   True,  "markdown"),
     "cascade":   ("tools/cascade_premarket.py", True,  "pre"),
     "financier": ("tools/financier_db.py",      False, "pre"),
+    "lowfloat":  ("tools/lowfloat_db.py",       False, "pre"),  # gap_events watch (fade-first read)
 }
+
+DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 TICKER_RE = re.compile(r'^[A-Za-z][A-Za-z.\-]{0,7}$')
 
@@ -56,7 +59,12 @@ def run_tool():
     script, takes_tickers, render_as = TOOLS[tool]
 
     args = [PY, os.path.join(ROOT, *script.split("/"))]
-    if takes_tickers:
+    if tool == "lowfloat":
+        args.append("watch")                 # fade-first read; optional date else latest in DB
+        date = (request.args.get("date", "") or "").strip()
+        if DATE_RE.match(date):
+            args += ["--date", date]
+    elif takes_tickers:
         tickers = clean_tickers(request.args.get("tickers", ""))
         if not tickers:
             return jsonify(ok=False, error="enter a valid ticker"), 400
@@ -77,5 +85,5 @@ def run_tool():
 
 
 if __name__ == "__main__":
-    print("WAT Command Center -> http://127.0.0.1:5057")
+    print("Low-Float Dilution Scanner -> http://127.0.0.1:5057")
     app.run(host="127.0.0.1", port=5057, debug=False)

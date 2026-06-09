@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WAT Command Center</title>
+<title>Low-Float Dilution Scanner</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
   :root{
@@ -43,7 +43,7 @@
 </head>
 <body>
 <header>
-  <h1>⚡ WAT COMMAND CENTER</h1>
+  <h1>⚡ LOW-FLOAT DILUTION SCANNER</h1>
   <span class="sub">low-float pre-open read · dilution · cascade · financier</span>
 </header>
 
@@ -52,9 +52,10 @@
     <input id="ticker" type="text" placeholder="ticker(s) — e.g. STI  or  STI LULU" autofocus>
     <button class="primary" onclick="run('dilution')">Dilution / Float</button>
     <button onclick="run('cascade')">Cascade</button>
+    <button onclick="run('lowfloat')">Low-Float Watch</button>
     <button onclick="run('financier')">Financier DB</button>
   </div>
-  <div class="hint">Dilution & Cascade use the ticker box. Financier DB shows the whole database. Enter = Dilution.</div>
+  <div class="hint">Dilution & Cascade use the ticker box. Low-Float Watch = fade-first gap-event read (optional date in the box, else latest). Financier DB shows the whole database. Enter = Dilution.</div>
 
   <div id="out"><div class="empty">Enter a ticker and pick a read.</div></div>
 </div>
@@ -68,12 +69,15 @@ const tickerEl = document.getElementById('ticker');
 tickerEl.addEventListener('keydown', e => { if(e.key==='Enter') run('dilution'); });
 
 async function run(tool){
-  const tickers = tickerEl.value.trim();
-  if(tool!=='financier' && !tickers){ out.innerHTML='<div class="empty">Type a ticker first.</div>'; return; }
-  out.innerHTML = '<div class="spinner">Running <b>'+tool+'</b>'+(tickers?(' · '+tickers):'')+' … (EDGAR + Polygon, a few seconds)</div>';
+  const box = tickerEl.value.trim();
+  const noInput = (tool==='financier' || tool==='lowfloat');   // these don't need a ticker
+  if(!noInput && !box){ out.innerHTML='<div class="empty">Type a ticker first.</div>'; return; }
+  out.innerHTML = '<div class="spinner">Running <b>'+tool+'</b>'+(box?(' · '+box):'')+' … (EDGAR + Polygon, a few seconds)</div>';
   document.querySelectorAll('button').forEach(b=>b.disabled=true);
   try{
-    const url = '/api/run?tool='+encodeURIComponent(tool)+'&tickers='+encodeURIComponent(tickers);
+    let url = '/api/run?tool='+encodeURIComponent(tool);
+    url += (tool==='lowfloat') ? '&date='+encodeURIComponent(box)   // box = optional YYYY-MM-DD
+                               : '&tickers='+encodeURIComponent(box);
     const r = await fetch(url);
     const j = await r.json();
     if(!j.ok && j.error){ out.innerHTML = '<pre style="color:var(--red)">'+j.error+'</pre>'; return; }
