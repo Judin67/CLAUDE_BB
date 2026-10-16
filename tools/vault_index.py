@@ -8,6 +8,8 @@ This tool gives every strategy the SAME page shape and keeps one index of all 66
 Commands
 --------
   python tools/vault_index.py split            one-time: catalog -> 66 pages (refuses if pages exist; --force to redo)
+                                               DONE 2026-10-15. The catalog was then trimmed (entries moved to pages);
+                                               to re-split, use the full catalog at git commit b469c13.
   python tools/vault_index.py index            rebuild strategies/pqn_vault/README.md from the pages' front matter
   python tools/vault_index.py check            sanity: 66 pages, 66 unique doc ids, front matter complete
 
@@ -242,6 +244,9 @@ Not run. When it is, results live in `results/{e['id']}/` (returns.csv · trades
 def cmd_split(force: bool):
     text = CATALOG.read_text(encoding="utf-8")
     tiers, entries = parse_catalog(text)
+    if not entries:
+        sys.exit("catalog has no per-strategy entries (they moved to the pages on 2026-10-15). "
+                 "To re-split, restore the full catalog: git show b469c13:workflows/pqn_strategy_vault.md")
     VAULT.mkdir(parents=True, exist_ok=True)
     existing = [p for p in VAULT.glob("*.md") if p.name != "README.md"]
     if existing and not force:
@@ -359,14 +364,20 @@ def cmd_check():
     if len(set(ids)) != len(ids):
         ok = False
         print("  !! duplicate ids")
-    page_docs = {RE_DOCID.search(fm["doc"]).group(1) for fm in pages if RE_DOCID.search(fm["doc"])}
-    cat_docs = set(RE_DOCID.findall(CATALOG.read_text(encoding="utf-8")))
-    print(f"doc ids: pages {len(page_docs)} · catalog {len(cat_docs)}")
-    if page_docs != cat_docs:
+    page_docs = [RE_DOCID.search(fm["doc"]).group(1) for fm in pages if RE_DOCID.search(fm["doc"])]
+    print(f"doc ids on pages: {len(page_docs)} ({len(set(page_docs))} unique)")
+    if len(page_docs) != len(pages) or len(set(page_docs)) != len(pages):
         ok = False
-        print("  !! page docs != catalog docs")
-        print("     only in catalog:", sorted(cat_docs - page_docs))
-        print("     only in pages:  ", sorted(page_docs - cat_docs))
+        print("  !! every page needs its own Drive doc link")
+    cat_docs = set(RE_DOCID.findall(CATALOG.read_text(encoding="utf-8")))
+    if cat_docs:   # only meaningful against the original, untrimmed catalog
+        if set(page_docs) != cat_docs:
+            ok = False
+            print("  !! page docs != catalog docs")
+            print("     only in catalog:", sorted(cat_docs - set(page_docs)))
+            print("     only in pages:  ", sorted(set(page_docs) - cat_docs))
+    else:
+        print("catalog holds no doc links (entries live on the pages) — catalog comparison skipped")
     print("OK" if ok else "FAILED")
     return ok
 
